@@ -1,0 +1,40 @@
+services:
+  db:
+    image: postgres:16
+    platform: linux/arm64
+    environment:
+      POSTGRES_DB: usedcar
+      POSTGRES_USER: usedcar
+      POSTGRES_PASSWORD: usedcar
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U usedcar -d usedcar"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
+  inspect-svc:
+    build: ./inspect-svc
+    environment:
+      DB_HOST: db
+      DB_NAME: usedcar
+      DB_USER: usedcar
+      DB_PASSWORD: usedcar
+      DJANGO_DEBUG: "1"
+    depends_on:
+      db:
+        condition: service_healthy
+    volumes:
+      - inspect_media:/data/media
+
+  report-view:
+    build: ./report-view
+    ports:
+      - "8080:80"
+    depends_on:
+      - inspect-svc
+
+volumes:
+  pgdata:
+  inspect_media:
