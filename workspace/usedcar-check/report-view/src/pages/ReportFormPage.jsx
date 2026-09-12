@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useRef, useState } from 'react'
-import { Link, useNavigate, useParams } from 'react-router-dom'
+import { Link, useNavigate, useParams, useSearchParams } from 'react-router-dom'
 import { api } from '../api'
 import PhotoGrid from '../components/PhotoGrid'
 import RatingPicker from '../components/RatingPicker'
@@ -12,7 +12,10 @@ function emptyRow() {
 
 export default function ReportFormPage() {
   const { id } = useParams()
+  const [searchParams] = useSearchParams()
+  const draftId = id || (searchParams.get('draft') ? String(searchParams.get('draft')) : '')
   const editing = Boolean(id)
+  const continuingDraft = Boolean(!editing && draftId)
   const navigate = useNavigate()
 
   const [items, setItems] = useState(null)
@@ -30,15 +33,17 @@ export default function ReportFormPage() {
   const [saving, setSaving] = useState(false)
   const [saveStatus, setSaveStatus] = useState('')
   const [saveError, setSaveError] = useState('')
+  const [savedReport, setSavedReport] = useState(null)
   const fileInputs = useRef({})
 
   useEffect(() => {
-    Promise.all([api.listItems(), editing ? api.getReport(id) : Promise.resolve(null)])
+    Promise.all([api.listItems(), draftId ? api.getReport(draftId) : Promise.resolve(null)])
       .then(([catalog, report]) => {
         setItems(catalog)
         const nextRows = {}
         for (const item of catalog) nextRows[item.id] = emptyRow()
         if (report) {
+          setSavedReport(report)
           setHeader({
             brand: report.brand,
             model: report.model,
@@ -60,7 +65,7 @@ export default function ReportFormPage() {
       })
       .catch((e) => setLoadError(e.message))
       .finally(() => setLoading(false))
-  }, [id, editing])
+  }, [draftId])
 
   const groups = useMemo(() => {
     if (!items) return []
@@ -121,6 +126,7 @@ export default function ReportFormPage() {
       return setSaveError('请填写有效里程')
 
     setSaving(true)
+    let saved = savedReport
     try {
       const payload = {
         brand: header.brand.trim(),
@@ -135,15 +141,36 @@ export default function ReportFormPage() {
         })),
       }
 
-      setSaveStatus('正在保存检测项…')
-      const saved = editing
-        ? await api.updateReport(id, payload)
+      const reportId = savedReport?.id || draftId
+      setSaveStatus(reportId ? '正在更新检测项…' : '正在保存检测项…')
+      saved = reportId
+        ? await api.updateReport(reportId, payload)
         : await api.createReport(payload)
+      setSavedReport(saved)
+      if (!editing && !continuingDraft) {
+        window.history.replaceState(null, '', `/reports/new?draft=${saved.id}`)
+      }
 
-      // 删除编辑中被移除的已有照片
+      // 删除编辑中被移除的已有照片。每成功一张就清理标记，失败重试时不会重复 DELETE。
       const removedIds = Object.values(rows).flatMap((r) => r.removedPhotoIds)
       for (const photoId of removedIds) {
-        await api.deletePhoto(photoId)
+        setSaveStatus('正在删除已移除的照片…')
+        try {
+          await api.deletePhoto(photoId)
+        } catch (err) {
+          if (err.status !== 404) throw err
+        }
+        setRows((prev) =>
+          Object.fromEntries(
+            Object.entries(prev).map(([itemId, row]) => [
+              itemId,
+              {
+                ...row,
+                removedPhotoIds: row.removedPhotoIds.filter((id) => id !== photoId),
+              },
+            ]),
+          ),
+        )
       }
 
       // 上传待传照片：按检测项找到保存后的 ReportItem id
@@ -156,13 +183,26 @@ export default function ReportFormPage() {
         for (const file of row.pending) {
           done += 1
           setSaveStatus(`正在上传照片 ${done}/${total}…`)
-          await api.uploadPhoto(reportItemId, file)
+          const photo = await api.uploadPhoto(reportItemId, file)
+          // 每张成功后立即落状态；失败重试时只处理仍在 pending 中的照片。
+          setRows((prev) => ({
+            ...prev,
+            [itemId]: {
+              ...prev[itemId],
+              photos: [...prev[itemId].photos, photo],
+              pending: prev[itemId].pending.filter((f) => f !== file),
+            },
+          }))
         }
       }
 
-      navigate(`/reports/${saved.id}`)
+      navigate(`/reports/${saved.id}`, { replace: true })
     } catch (e) {
-      setSaveError(e.message)
+      setSaveError(
+        saved?.id
+          ? `${e.message}。报告已保存（#${saved.id}），请修复后再次点击；系统会继续上传剩余照片，不会重复创建报告。`
+          : e.message,
+      )
       setSaving(false)
     }
   }
@@ -174,10 +214,17 @@ export default function ReportFormPage() {
     <div className="form-page">
       <div className="page-head">
         <div>
-          <h1>{editing ? '编辑检测报告' : '新建检测报告'}</h1>
+          <h1>
+            {editing ? '编辑检测报告' : savedReport ? '继续完成检测报告' : '新建检测报告'}
+          </h1>
           <p className="muted">
             逐项选择评级并填写状况描述，可附照片；未评级的项目不计入综合评分
           </p>
+          {savedReport && !editing && (
+            <p className="muted small">
+              报告 #{savedReport.id} 已创建；如照片上传中断，重新提交只会更新这份报告，不会新建重复记录。
+            </p>
+          )}
         </div>
         <Link to="/" className="btn">
           ← 返回列表
@@ -320,7 +367,13 @@ export default function ReportFormPage() {
           取消
         </Link>
         <button className="btn btn-primary" disabled={saving} onClick={submit}>
-          {saving ? saveStatus || '保存中…' : editing ? '保存修改' : '生成报告'}
+          {saving
+            ? saveStatus || '保存中…'
+            : savedReport
+              ? '继续保存照片'
+              : editing
+                ? '保存修改'
+                : '生成报告'}
         </button>
       </div>
     </div>

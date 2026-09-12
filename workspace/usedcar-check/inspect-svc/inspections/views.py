@@ -92,7 +92,7 @@ class ReportViewSet(viewsets.ModelViewSet):
             }
             for report, results in zip(reports, item_results_by_report):
                 result = results.get(item.id)
-                if result is None or not result.rating:
+                if result is None:
                     cell = {
                         "report": report.id,
                         "rating": None,
@@ -101,10 +101,11 @@ class ReportViewSet(viewsets.ModelViewSet):
                         "photos": [],
                     }
                 else:
+                    rating = result.rating or None
                     cell = {
                         "report": report.id,
-                        "rating": result.rating,
-                        "score": RATING_SCORES[result.rating],
+                        "rating": rating,
+                        "score": RATING_SCORES[rating] if rating else None,
                         "description": result.description,
                         "photos": ReportItemPhotoSerializer(
                             result.photos.all(), many=True,
